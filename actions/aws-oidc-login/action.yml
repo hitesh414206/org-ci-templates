@@ -1,0 +1,19 @@
+name: "Docker Build & Push"
+description: "Build and push Docker image"
+
+inputs:
+  image-name:
+    required: true
+  image-tag:
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - run: |
+        docker build -t ${{ inputs.image-name }}:${{ inputs.image-tag }} .
+      shell: bash
+
+    - run: |
+        docker push ${{ inputs.image-name }}:${{ inputs.image-tag }}
+      shell: bash

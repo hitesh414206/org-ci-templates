@@ -1,0 +1,165 @@
+name: Enterprise Promotion Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        required: true
+        type: string
+    secrets:
+      AWS_ROLE_ARN:
+        required: true
+      AWS_REGION:
+        required: true
+      ECR_REPOSITORY:
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+
+  # =========================
+  # 1️⃣ MATRIX TEST
+  # =========================
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - run: pip install pytest
+      - run: pytest
+
+  # =========================
+  # 2️⃣ BUILD ONCE
+  # =========================
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "tag=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Build Docker Image
+        run: |
+          docker build -t ${{ inputs.image-name }}:${{ steps.meta.outputs.tag }} .
+
+      - name: Save Image
+        run: |
+          docker save ${{ inputs.image-name }}:${{ steps.meta.outputs.tag }} > image.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: image.tar
+
+  # =========================
+  # 3️⃣ DEPLOY DEV
+  # =========================
+  deploy-dev:
+    needs: build
+    if: startsWith(github.ref_name, 'feature/')
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - run: docker load < image.tar
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - run: |
+          docker tag ${{ inputs.image-name }}:${{ needs.build.outputs.image-tag }} \
+          ${{ secrets.ECR_REPOSITORY }}:${{ needs.build.outputs.image-tag }}
+
+          docker push \
+          ${{ secrets.ECR_REPOSITORY }}:${{ needs.build.outputs.image-tag }}
+
+  # =========================
+  # 4️⃣ DEPLOY TEST
+  # =========================
+  deploy-test:
+    needs: build
+    if: startsWith(github.ref_name, 'release/')
+    runs-on: ubuntu-latest
+    environment: test
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - run: docker load < image.tar
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - run: |
+          docker tag ${{ inputs.image-name }}:${{ needs.build.outputs.image-tag }} \
+          ${{ secrets.ECR_REPOSITORY }}:${{ needs.build.outputs.image-tag }}
+
+          docker push \
+          ${{ secrets.ECR_REPOSITORY }}:${{ needs.build.outputs.image-tag }}
+
+  # =========================
+  # 5️⃣ DEPLOY PROD
+  # =========================
+  deploy-prod:
+    needs: build
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    environment: production
+
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: true
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - run: docker load < image.tar
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - run: |
+          docker tag ${{ inputs.image-name }}:${{ needs.build.outputs.image-tag }} \
+          ${{ secrets.ECR_REPOSITORY }}:${{ needs.build.outputs.image-tag }}
+
+          docker push \
+          ${{ secrets.ECR_REPOSITORY }}:${{ needs.build.outputs.image-tag }}

@@ -1,0 +1,91 @@
+name: Enterprise Python CI/CD
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        required: true
+        type: string
+    secrets:
+      AWS_ROLE_ARN:
+        required: true
+      AWS_REGION:
+        required: true
+      ECR_REPOSITORY:
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+
+  # =========================
+  # 1️⃣ Matrix Test
+  # =========================
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - run: pip install pytest
+      - run: pytest
+
+  # =========================
+  # 2️⃣ Build
+  # =========================
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "tag=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+
+      - uses: hitesh414206/org-ci-templates/actions/docker-build@v1
+        with:
+          image-name: ${{ inputs.image-name }}
+          image-tag: ${{ steps.meta.outputs.tag }}
+
+  # =========================
+  # 3️⃣ Deploy
+  # =========================
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name }}
+
+    concurrency:
+      group: prod-deploy
+      cancel-in-progress: true
+
+    if: |
+      github.ref_name == 'feature/dev-test' ||
+      startsWith(github.ref_name, 'release/') ||
+      github.ref_name == 'main'
+
+    steps:
+      - uses: hitesh414206/org-ci-templates/actions/aws-oidc-login@v1
+        with:
+          role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: hitesh414206/org-ci-templates/actions/docker-build@v1
+        with:
+          image-name: ${{ secrets.ECR_REPOSITORY }}
+          image-tag: ${{ needs.build.outputs.image-tag }}
